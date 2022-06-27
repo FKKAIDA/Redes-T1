@@ -4,21 +4,247 @@ from tcp import Servidor
 import re
 
 
+# VAriáveis auxiliares
+
+mensagem = b''
+conexoes = [] #
+canais = [] #Uma lista para registrar o nome do canal e a lista de conectados a ele
+
+# Objeto conexao
+
+
+def apelido_em_uso(apelido):
+    for checar in conexoes:
+        if checar[0] == apelido or checar[0].lower() == apelido.lower():
+            return True
+    return False
+
+def get_canal_lista(canal):
+    for checar in canais:
+        if canal == checar[0] or canal.lower() == checar[0].lower():
+            #print(checar)
+            return checar
+    return 0
+
+def append_conexao(canal, conexao):
+    for checar in canais:
+        if canal == checar[0]:
+            checar[1].append(conexao)
+
+def remover_conexao(canal, conexao):
+    for checar in canais:
+        if canal == checar[0]:
+            #print("Usuarios Conectados:",checar[1])
+            try:
+                checar[1].remove(conexao)
+                #print("Usuarios Conectados:",checar[1])
+                #break
+            except:
+                pass
+
+def conexao_em_uso(conexao):
+    for checar in conexoes:
+        if checar[1] == conexao:
+            return True
+    return False
+
+def get_nick(conexao):
+    for checar in conexoes:
+        if checar[1] == conexao:
+            return checar[0]
+
+
+def get_conexao(nick):
+    for checar in conexoes:
+        if checar[0] == nick or checar[0].lower() == nick.lower():
+            return checar[1]
+
+def trocar_nick(conexao, newnick):
+    for checar in conexoes:
+        if checar[1] == conexao:
+            checar[0] = newnick
+            done = True
+
 def validar_nome(nome):
     return re.match(br'^[a-zA-Z][a-zA-Z0-9_-]*$', nome) is not None
 
+def usuarios_no_canal(canal_name):
+    users=[]
+    for canal in canais:
+        if canal[0] == canal_name:
+            for conex in canal[1]:
+                users.append(get_nick(conex))
+            break
+    return sorted(users)
+
 
 def sair(conexao):
-    print(conexao, 'conexão fechada')
+    global mensagem
+    lista_canal = []
+    lista_conex = []
+
+    for canal in canais:
+        if conexao in canal[1]:
+            lista_canal.append(canal[0])
+            for conex in canal[1]:
+                if conex != conexao:
+                    lista_conex.append(conex)
+    lista_conex = list(set(lista_conex))
+    nick = get_nick(conexao)
+    for conex in conexoes:
+        if conex[1] == conexao:
+            conexoes.remove(conex)
     conexao.fechar()
+    for enviar_para in lista_conex:
+        if(conexao_em_uso(enviar_para)):
+            enviar_para.enviar(b':' + nick + b' QUIT :Connection closed\r\n')
+        mensagem = b''
+    
+    for canal in lista_canal:
+        remover_conexao(canal,conexao)
 
 
 def dados_recebidos(conexao, dados):
+    # 1) Retorna caso a entrada esteja vazia.
+
     if dados == b'':
         return sair(conexao)
-    print(conexao, dados)
+
+    # 2) Trata chegadas quebradas ou agrupadas.
+
+    vazio = 0
+    global mensagem
+
+    while (vazio != 1):
+
+        # -- GARANTE A INTEGRIDADE DA MENSAGEM --
+
+        print("Recebendo: ", str(dados))
+        quebras = dados.count(b'\n')
+        # Trata integridade da mensagem
+        if quebras == 0:  # Mensagem incompleta
+            mensagem = mensagem + dados
+            vazio = 1
+        elif quebras == 1 and dados.endswith(b'\n'):  # Mensagem completa ou finalizada
+            mensagem = mensagem + dados
+            completo = 1
+            vazio = 1
+        else:
+            dividido = dados.split(b'\n', 1)
+            if b'\n' in dados:
+                mensagem = dividido[0] + b'\n'
+            # mensagem = mensagem.replace(b'\\r', b'\r\n')
+            # mensagem = str.encode(mensagem)
+            dados = dividido[1]
+
+        ## -- OK, HORA DE PROCESSAR A MENSAGEM --
+
+        # 1) Ping?
+        if mensagem.startswith(b'PING') and mensagem.endswith(b'\n'):
+            conexao.enviar(b':server PONG server :' + mensagem.split(b' ', 1)[1])
+            mensagem = b''
+
+        # 2) Quer definir um nick?
+        if mensagem.startswith(b'NICK') and mensagem.endswith(b'\n'):
+            #print("Recebi uma msg com nick!")
+            # Primerio, extrair o nick
+
+            inserido_nick = mensagem.split(b' ', 1)[1]
+            tratado = inserido_nick.split(b'\r', 1)[0]
+
+            if validar_nome(tratado): # O nick é válido
+
+                if not apelido_em_uso(tratado): # O nick não está em uso
+
+                    if not conexao_em_uso(conexao):
+                        conexao.enviar(b':server 001 ' + tratado + b' :Welcome\r\n')
+                        conexao.enviar(b':server 422 ' + tratado + b' :MOTD File is missing\r\n')
+                        conexoes.append([tratado,conexao])
+                        mensagem = b''
+
+                    else:
+                        antigo = get_nick(conexao)
+                        trocar_nick(conexao, tratado)
+                        conexao.enviar(b':' + antigo + b' NICK ' + tratado + b'\r\n')
 
 
+                else: # O nick está em uso
+                    if conexao_em_uso(conexao): # A conexão está em uso
+                        conexao.enviar(b':server 433 ' + get_nick(conexao)+ b' ' + tratado + b' :Nickname is already in use\r\n')
+                        mensagem = b''
+                    else:
+                        conexao.enviar(b':server 433 * ' + tratado + b' :Nickname is already in use\r\n')
+                        mensagem = b''
+
+            else: # O nick é inválido
+                conexao.enviar(b':server 432 * ' + tratado + b' :Erroneous nickname\r\n')
+                mensagem = b''
+            mensagem = b''
+
+        # 3) Quer mandar mensagem privada?
+        if mensagem.startswith(b'PRIVMSG') and mensagem.endswith(b'\n'):
+            enviado = mensagem.split(b' ')
+            #print(enviado[0])
+            destinatario = enviado[1]
+            conteudo = enviado[2]
+
+            if destinatario.startswith(b'#'): # Para um canal
+                lista_canal = get_canal_lista(destinatario)
+                if len(lista_canal[1])>1:
+                    for enviar_para in lista_canal[1]:
+                        if get_nick(enviar_para) != get_nick(conexao):
+                            print((b'Enviando :' + get_nick(conexao) + b' PRIVMSG ' + destinatario + b' ' + conteudo + b'para: ' + get_nick(enviar_para)))
+                            enviar_para.enviar(b':' + get_nick(conexao) + b' PRIVMSG ' + destinatario + b' ' + conteudo)
+                            mensagem = b''
+            else: #Para um usuário
+                if apelido_em_uso(destinatario):
+                    get_conexao(destinatario).enviar(b':' + get_nick(conexao) + b' PRIVMSG ' + destinatario + b' ' + conteudo)
+                    mensagem = b''
+                else:
+                    mensagem = b''
+
+        # 4) Quer entrar no canal?
+        if mensagem.startswith(b'JOIN') and mensagem.endswith(b'\n'):
+            canal = mensagem.split(b' ')[1]
+            canal = canal.replace(b'\r\n',b'')
+            canais.append([canal, []])
+            append_conexao(canal, conexao)
+            lista_conex=get_canal_lista(canal)[1]
+            for conex in lista_conex:
+                conex.enviar(b':%s JOIN :%s\r\n' % (get_nick(conexao), canal))
+            
+            users = usuarios_no_canal(canal)
+
+            i = 0
+            while(i < len(users)):
+                msg = b':server 353 %s = %s :' % (get_nick(conexao),canal)
+                while(len(msg)+len(users)+2 <= 512 and i < len(users)):
+                    msg = msg + users[i]
+                    if i < len(users)-1:
+                        msg = msg + b' '
+                    else:
+                        msg = msg + b'\r\n'
+                    i = i + 1
+                conexao.enviar(msg)
+            msg = b':server 366 %s %s :End of /NAMES list.\r\n'%(get_nick(conexao),canal)
+            conexao.enviar(msg)
+            mensagem = b''
+
+        # 5) Quer sair no canal?
+        if mensagem.startswith(b'PART') and mensagem.endswith(b'\n'):
+            canal = mensagem.split(b' ')[1]
+            canal = canal.replace(b'\r\n',b'')
+            lista_canal = get_canal_lista(canal)
+            #print("lista canal=",lista_canal)
+            if lista_canal != 0:
+                for enviar_para in lista_canal[1]:
+                    enviar_para.enviar(b':%s PART %s\r\n' % (get_nick(conexao), canal))
+                    mensagem = b''
+            remover_conexao(canal, conexao)
+            #print("lista canal=",lista_canal)
+            mensagem = b''
+
+        # 6) Canal encerrado
 def conexao_aceita(conexao):
     print(conexao, 'nova conexão')
     conexao.registrar_recebedor(dados_recebidos)
